@@ -1,7 +1,6 @@
 # DeedBox
 
-A practice management and trust accounting system for law firms, built so that
-the database itself enforces the rules that matter.
+Free, open-source and complete practice management system for law firms: matters and conflicts, time and billing, trust accounting, documents with e-signature and a client portal, workflows and key dates, reporting, email filing, and migration from your previous system. Self-hosted — your practice, your data, on your own systems.
 
 ## What it is
 
