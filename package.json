@@ -1,0 +1,33 @@
+{
+  "name": "deedbox",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "docxtemplater": "^3.66.6",
+    "next": "16.2.6",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.21.0",
+    "pizzip": "^3.2.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^24",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^4.1.7"
+  }
+}
