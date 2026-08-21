@@ -19,7 +19,11 @@ import {
   handleInboundSubmission,
   reviewDuplicateDecision,
   exportKeyActivity,
+  setKeyTemplatesRead,
+  templatesList,
+  templatesFetch,
 } from '@/lib/ops/interface'
+import { setDocumentByteFetch } from '@/lib/ops/documents/store'
 import {
   queueOutboundMessage,
   dispatchOutboundQueue,
@@ -440,5 +444,129 @@ describe('outbound queue', () => {
     const r = await retrieveArtefact(P, { artefact: queued.artefact })
     expect(r.content).toBe('Hello Exact Copy intf 123')
     expect(r.kind).toBe('outbound_rendering')
+  })
+})
+
+describe('the templates read door (0062) — per-key opt-in, templates only', () => {
+  const docxBytes = Buffer.from('PK fake-docx bytes for the round trip test')
+  let readKey: { id: number; keyDisplay: string; secret: string }
+  let activeTemplate: number
+  let inactiveTemplate: number
+
+  beforeAll(async () => {
+    readKey = await issueIntegrationKey(P, { label: 'Reader intf' })
+    const t1 = await admin.query(
+      `insert into deedbox.document_template
+         (name, category, filename, storage_ref, size_bytes, active, created_by)
+       values ('Intf Cost Agreement', 'Costs', 'intf-ca.docx', 'intf-tpl-active', $1, true, $2)
+       returning id`,
+      [docxBytes.length, fx.staff],
+    )
+    activeTemplate = t1.rows[0].id as number
+    const t2 = await admin.query(
+      `insert into deedbox.document_template
+         (name, category, filename, storage_ref, size_bytes, active, created_by)
+       values ('Intf Dormant', 'Costs', 'intf-dormant.docx', 'intf-tpl-inactive', 10, false, $1)
+       returning id`,
+      [fx.staff],
+    )
+    inactiveTemplate = t2.rows[0].id as number
+  })
+
+  it('a key without the switch is refused typed, with evidence; flipping is registered', async () => {
+    const refused = await templatesList(fx.firm, readKey.secret)
+    expect(refused.outcome).toBe('not_enabled')
+    const refusalEvidence = await admin.query(
+      `select 1 from deedbox.register_entry
+        where event_kind = 'key.used' and subject_type = 'integration_key' and subject = $1
+          and detail ->> 'door' = 'templates'
+          and detail ->> 'outcome' = 'templates_read_not_enabled'`,
+      [readKey.id],
+    )
+    expect(refusalEvidence.rowCount).toBe(1)
+
+    await setKeyTemplatesRead(P, { key: readKey.id, enabled: true })
+    const flip = await admin.query(
+      `select privileged, detail from deedbox.register_entry
+        where event_kind = 'record.changed' and subject_type = 'integration_key' and subject = $1
+          and detail -> 'after' ->> 'templates_read' = 'true'`,
+      [readKey.id],
+    )
+    expect(flip.rowCount).toBe(1)
+    expect(flip.rows[0].privileged).toBe(true)
+    expect(flip.rows[0].detail.before.templates_read).toBe(false)
+  })
+
+  it('list names active templates with the declared grammar; fetch round-trips the bytes; both are evidenced', async () => {
+    setDocumentByteFetch(async (storageRef) => {
+      if (storageRef !== 'intf-tpl-active') throw new Error(`unexpected storage ref ${storageRef}`)
+      return { bytes: docxBytes, contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }
+    })
+    try {
+      const list = await templatesList(fx.firm, readKey.secret)
+      expect(list.outcome).toBe('ok')
+      if (list.outcome !== 'ok') return
+      const mine = list.result.templates.find((t) => t.id === activeTemplate)
+      expect(mine).toBeDefined()
+      expect(mine!.name).toBe('Intf Cost Agreement')
+      expect(mine!.filename).toBe('intf-ca.docx')
+      expect(mine!.merge_grammar).toBe('double_angle_dotted')
+      expect(mine!.merge_delimiters).toEqual({ start: '<<', end: '>>' })
+      // the dormant template never appears
+      expect(list.result.templates.find((t) => t.id === inactiveTemplate)).toBeUndefined()
+
+      const fetched = await templatesFetch(fx.firm, readKey.secret, activeTemplate)
+      expect(fetched.outcome).toBe('ok')
+      if (fetched.outcome !== 'ok') return
+      expect(Buffer.from(fetched.result.file_base64, 'base64').equals(docxBytes)).toBe(true)
+      expect(fetched.result.filename).toBe('intf-ca.docx')
+      expect(fetched.result.size_bytes).toBe(docxBytes.length)
+
+      const evidence = await admin.query(
+        `select detail ->> 'outcome' as o from deedbox.register_entry
+          where event_kind = 'key.used' and subject_type = 'integration_key' and subject = $1
+            and detail ->> 'door' = 'templates'
+            and detail ->> 'outcome' in ('list', 'fetch')`,
+        [readKey.id],
+      )
+      const outcomes = evidence.rows.map((r) => r.o)
+      expect(outcomes).toContain('list')
+      expect(outcomes).toContain('fetch')
+      const lastUsed = await admin.query(
+        `select last_used_at from deedbox.integration_key where id = $1`,
+        [readKey.id],
+      )
+      expect(lastUsed.rows[0].last_used_at).not.toBeNull()
+    } finally {
+      setDocumentByteFetch(null)
+    }
+  })
+
+  it('the door serves templates and nothing else: dormant refused, foreign ids refused, wrong secrets refused', async () => {
+    // an inactive template is outside the door even with the switch on
+    const dormant = await templatesFetch(fx.firm, readKey.secret, inactiveTemplate)
+    expect(dormant.outcome).toBe('not_found')
+    // an id from any other record family finds nothing — the fetch reads
+    // ONLY the template registry (probe with an id no template carries)
+    const foreign = await templatesFetch(fx.firm, readKey.secret, 99999901)
+    expect(foreign.outcome).toBe('not_found')
+    // a wrong secret never gets as far as the switch
+    const stranger = await templatesList(fx.firm, 'not-a-real-secret')
+    expect(stranger.outcome).toBe('unauthenticated')
+  })
+
+  it('a revoked key is refused with evidence even with the switch on', async () => {
+    const doomed = await issueIntegrationKey(P, { label: 'Doomed reader intf' })
+    await setKeyTemplatesRead(P, { key: doomed.id, enabled: true })
+    await revokeIntegrationKey(P, { key: doomed.id })
+    const r = await templatesList(fx.firm, doomed.secret)
+    expect(r.outcome).toBe('revoked')
+    const evidence = await admin.query(
+      `select 1 from deedbox.register_entry
+        where event_kind = 'key.used' and subject_type = 'integration_key' and subject = $1
+          and detail ->> 'door' = 'templates' and detail ->> 'outcome' = 'revoked_attempt'`,
+      [doomed.id],
+    )
+    expect(evidence.rowCount).toBe(1)
   })
 })

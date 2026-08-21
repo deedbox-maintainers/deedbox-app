@@ -13,6 +13,8 @@ import { createHash } from 'node:crypto'
 import type { Principal, Tx } from '@/lib/db'
 import { withPrincipal, emitRegister, OperationRefused } from '@/lib/db'
 import { requireStaff, hasCapability } from '@/lib/ops/shared'
+import { createDocumentWithFileInTx } from '@/lib/ops/documents/documents'
+import { requireByteStore } from '@/lib/ops/documents/store'
 
 export interface QueueMessageInput {
   channel: 'email' | 'text_message'
@@ -72,6 +74,21 @@ export async function queueOutboundMessage(
   return withPrincipal(p, (tx) => queueOutboundMessageInTx(tx, p, input))
 }
 
+/** A document the transport actually attached to the delivered message —
+ *  reported back so the product can file the exact copy the recipient got. */
+export interface DeliveredAttachment {
+  filename: string
+  contentType: string
+  /** base64 — the shape the mail API carries. */
+  contentBase64: string
+}
+
+/** What a transport may report about a completed delivery. A transport that
+ *  reports nothing (returns void) delivers exactly as before. */
+export interface DeliveryReport {
+  attachments?: DeliveredAttachment[]
+}
+
 export type Deliverer = (message: {
   id: number
   channel: string
@@ -81,7 +98,7 @@ export type Deliverer = (message: {
   purpose: string
   /** The stored artefact's content type; null when the reference itself is the deliverable. */
   contentType: string | null
-}) => Promise<void>
+}) => Promise<void | DeliveryReport>
 
 /**
  * The dispatch job: queued rows oldest-first, handed to the
@@ -99,7 +116,8 @@ export async function dispatchOutboundQueue(
   for (let i = 0; i < limit; i++) {
     const advanced = await withPrincipal(p, async (tx) => {
       const next = await tx.query(
-        `select m.id, m.channel, m.recipient, m.rendered_artefact, m.purpose
+        `select m.id, m.channel, m.recipient, m.rendered_artefact, m.purpose,
+                m.related_type, m.related
            from deedbox.outbound_message m
           where m.state = 'queued'
           order by m.queued_at, m.id
@@ -123,7 +141,7 @@ export async function dispatchOutboundQueue(
         contentType = (art.rows[0]?.content_type as string) ?? null
       }
       try {
-        await deliver({
+        const report = await deliver({
           id: row.id as number,
           channel: row.channel as string,
           recipient: row.recipient as string,
@@ -135,20 +153,135 @@ export async function dispatchOutboundQueue(
           `update deedbox.outbound_message set state = 'sent', sent_at = now() where id = $1`,
           [row.id],
         )
-        return 'sent' as const
+        return {
+          outcome: 'sent' as const,
+          message: row.id as number,
+          purpose: row.purpose as string,
+          recipient: row.recipient as string,
+          relatedType: (row.related_type as string) ?? null,
+          related: (row.related as number) ?? null,
+          renderedArtefact: ref,
+          attachments: report && typeof report === 'object' ? (report.attachments ?? []) : [],
+        }
       } catch (err) {
         await tx.query(
           `update deedbox.outbound_message set state = 'failed', failed_reason = $2 where id = $1`,
           [row.id, err instanceof Error ? err.message : String(err)],
         )
-        return 'failed' as const
+        return { outcome: 'failed' as const }
       }
     })
     if (advanced === null) break
-    if (advanced === 'sent') sent++
-    else failed++
+    if (advanced.outcome === 'sent') {
+      sent++
+      // the despatched copy belongs on the matter's file — filed AFTER the
+      // send is committed, in its own transactions, so a filing problem can
+      // never unsend a message (a rolled-back send mark would redeliver)
+      if (
+        advanced.purpose === 'bill_despatch' &&
+        advanced.relatedType === 'bill' &&
+        advanced.related !== null &&
+        advanced.attachments.length > 0
+      ) {
+        await fileDespatchedBillCopy(p, {
+          message: advanced.message,
+          bill: advanced.related,
+          recipient: advanced.recipient,
+          renderedArtefact: advanced.renderedArtefact,
+          attachments: advanced.attachments,
+        })
+      }
+    } else failed++
   }
   return { sent, failed }
+}
+
+/**
+ * File the exact copy a bill despatch delivered onto the bill's matter:
+ * bytes first through the documents byte store, then the ordinary document
+ * creation (landing row, head, version, register) attributed to the staff
+ * member who ran the send ceremony. Exactly once per despatched message.
+ * Failure is recorded on the register and never disturbs the sent message.
+ */
+async function fileDespatchedBillCopy(
+  p: Principal,
+  d: {
+    message: number
+    bill: number
+    recipient: string
+    renderedArtefact: string
+    attachments: DeliveredAttachment[]
+  },
+): Promise<void> {
+  try {
+    const target = await withPrincipal(
+      p,
+      async (tx) => {
+        const dup = await tx.query(`select 1 from deedbox.document_file where external_ref = $1`, [
+          `outbound_despatch:${d.message}`,
+        ])
+        if (dup.rowCount! > 0) return null
+        const b = await tx.query(`select matter from deedbox.bill where id = $1`, [d.bill])
+        if (b.rowCount === 0) {
+          throw new OperationRefused('bill_missing', 'the despatched bill no longer resolves')
+        }
+        // the send ceremony registered this despatch with its exact artefact —
+        // that entry names the staff member the filed copy is attributed to
+        const sender = await tx.query(
+          `select actor from deedbox.register_entry
+            where subject_type = 'bill' and subject = $1 and event_kind = 'record.changed'
+              and artefact = $2 and actor_kind = 'staff'
+            order by id desc limit 1`,
+          [d.bill, d.renderedArtefact],
+        )
+        if (sender.rowCount === 0) {
+          throw new OperationRefused(
+            'sender_unknown',
+            'no send ceremony names a staff sender for this despatch',
+          )
+        }
+        return { matter: b.rows[0].matter as number, sender: sender.rows[0].actor as number }
+      },
+      { readOnly: true },
+    )
+    if (target === null) return
+    // bytes first, all of them, outside the row transaction
+    const store = requireByteStore()
+    const filed: { att: DeliveredAttachment; bytes: Buffer; storageRef: string; contentType: string }[] = []
+    for (const att of d.attachments) {
+      const bytes = Buffer.from(att.contentBase64, 'base64')
+      const stored = await store({ matter: target.matter, filename: att.filename, bytes })
+      filed.push({ att, bytes, storageRef: stored.storageRef, contentType: stored.contentType })
+    }
+    await withPrincipal(p, async (tx) => {
+      for (const f of filed) {
+        await createDocumentWithFileInTx(tx, p, {
+          matter: target.matter,
+          filename: f.att.filename,
+          contentType: f.contentType,
+          sizeBytes: f.bytes.length,
+          storageRef: f.storageRef,
+          source: 'outbound_despatch',
+          title: f.att.filename.replace(/\.[a-z0-9]+$/i, ''),
+          description: `Despatched to ${d.recipient}`,
+          createdBy: target.sender,
+          externalRef: `outbound_despatch:${d.message}`,
+        })
+      }
+    })
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e)
+    await withPrincipal(p, async (tx) => {
+      await emitRegister(tx, p, {
+        kind: 'record.changed',
+        subjectType: 'outbound_message',
+        subject: d.message,
+        detail: { despatch_filing_failed: reason },
+      })
+    }).catch(() => {
+      // the register note is best-effort: the send already stands
+    })
+  }
 }
 
 /** The generic manual retry: a NEW row via retry_of, content identical. */

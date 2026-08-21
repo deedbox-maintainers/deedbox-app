@@ -26,7 +26,7 @@ export default async function HeldFundsPage({ searchParams }: { searchParams: Se
             <MatterPicker
               name="matter"
               label="Matter"
-              hint="Pick one matter — or leave blank to preview firm-wide (every matter holding money that can pay a bill)"
+              hint="Pick one matter — or leave blank to sweep the whole firm: every issued bill still owing on a matter holding available client money is found and prepared for approval"
             />
           </div>
           <div className="pb-8">

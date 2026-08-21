@@ -97,3 +97,41 @@ export async function revokeIntegrationKey(
     })
   })
 }
+
+/**
+ * The template-reading switch (0062): per key, off by default, templates
+ * only. Flipping it is a recorded, privileged change on the key — the keys
+ * screens are its only home, and the register carries every flip.
+ */
+export async function setKeyTemplatesRead(
+  p: Principal,
+  input: { key: number; enabled: boolean },
+): Promise<void> {
+  await withPrincipal(p, async (tx) => {
+    await requireCapability(tx, p, 'keys.manage')
+    const cur = await tx.query(
+      `select id, label, key_display, revoked_at, templates_read
+         from deedbox.integration_key where id = $1 for update`,
+      [input.key],
+    )
+    if (cur.rowCount === 0) throw new OperationRefused('not_found', 'integration key not found')
+    if (cur.rows[0].revoked_at !== null) {
+      throw new OperationRefused('revoked', 'a revoked key is immutable')
+    }
+    if (Boolean(cur.rows[0].templates_read) === input.enabled) return
+    await tx.query(`update deedbox.integration_key set templates_read = $2 where id = $1`, [
+      input.key,
+      input.enabled,
+    ])
+    await emitRegister(tx, p, {
+      kind: 'record.changed',
+      subjectType: 'integration_key',
+      subject: input.key,
+      privileged: true,
+      detail: {
+        before: { label: cur.rows[0].label, templates_read: Boolean(cur.rows[0].templates_read) },
+        after: { label: cur.rows[0].label, templates_read: input.enabled },
+      },
+    })
+  })
+}

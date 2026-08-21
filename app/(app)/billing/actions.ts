@@ -7,7 +7,6 @@
 
 import { act } from '@/lib/screens/action'
 import { OperationRefused } from '@/lib/db'
-import { heldFundsFirmScope } from '@/lib/reads/billing'
 import { recomputePositionCache } from '@/lib/ops/reports'
 import {
   createTimeEntry,
@@ -57,6 +56,7 @@ import {
   confirmTopUpRequest,
   cancelTopUpRequest,
   previewHeldFundsApplication,
+  prepareFirmWideHeldFunds,
   commitHeldFundsApplication,
   authoriseHeldFundsItem,
   abandonHeldFundsRun,
@@ -779,25 +779,21 @@ export async function createSequenceAction(formData: FormData): Promise<void> {
 export async function previewHeldFundsAction(formData: FormData): Promise<void> {
   await act('/billing/held-funds', async (p) => {
     const matter = parse.numOrNull(formData, 'matter')
-    // blank = firm-wide, resolved to the EXPLICIT list of every matter
-    // holding an entitlement — the run records exactly what it covered,
-    // and the operation never receives an unnamed scope
-    let scope: { matter?: number; matters?: number[] }
     if (matter !== null) {
-      scope = { matter }
-    } else {
-      const matters = await heldFundsFirmScope(p)
-      if (matters.length === 0) {
-        throw new OperationRefused(
-          'nothing_to_apply',
-          'no matter currently holds money with an entitlement that can pay a bill',
-        )
-      }
-      scope = { matters }
+      const r = await previewHeldFundsApplication(p, { matter })
+      return `goto:/billing/held-funds/${r.run}?done=${encodeURIComponent(
+        `Preview ready: ${r.executable.length} executable, ${r.refused.length} refused with reasons. Nothing has moved.`,
+      )}`
     }
-    const r = await previewHeldFundsApplication(p, scope)
+    // blank = the firm-wide sweep: every issued bill still owing on a matter
+    // holding available client money is found, its claim recorded, and the
+    // run previewed — the run records exactly what it covered, and nothing
+    // moves until the run commits and each transfer takes its authorisation
+    const r = await prepareFirmWideHeldFunds(p)
     return `goto:/billing/held-funds/${r.run}?done=${encodeURIComponent(
-      `Preview ready: ${r.executable.length} executable, ${r.refused.length} refused with reasons. Nothing has moved.`,
+      `Firm-wide sweep: ${r.executable} bill(s) can be paid from held money${
+        r.refused > 0 ? `, ${r.refused} refused with reasons` : ''
+      }. Nothing has moved — commit the run, then each transfer takes its authorisation.`,
     )}`
   })
 }

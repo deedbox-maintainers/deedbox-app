@@ -6,7 +6,7 @@
 
 import type { Principal } from '@/lib/db'
 import { withPrincipal, OperationRefused } from '@/lib/db'
-import { requireStaff, hasCapability, requireCapability, settingText, settingBool, taxTreatments, type TaxTreatment } from '@/lib/ops/shared'
+import { requireStaff, hasCapability, requireCapability, settingText, settingBool, taxTreatments, firmRegional, type TaxTreatment } from '@/lib/ops/shared'
 
 function personNameText(v: unknown): string {
   const p = v as { given?: string; family?: string } | null
@@ -904,6 +904,75 @@ export async function heldFundsRunDetail(p: Principal, runId: number) {
         [runId],
       )
       return { run: run.rows[0], items: items.rows }
+    },
+    { readOnly: true },
+  )
+}
+
+/** Everything the consolidated EFT requisition for one run says: every
+ *  COMPLETED transfer with its numbers and approvals, grouped by the client
+ *  account the money left, the firm's own receiving details, and the grand
+ *  total — one form for the one bank transfer that covers them all. */
+export async function heldFundsRunRequisition(p: Principal, runId: number) {
+  requireStaff(p)
+  return withPrincipal(
+    p,
+    async (tx) => {
+      const run = await tx.query(
+        `select ar.id, ar.run_at, ar.state, s.person_name as run_by_name,
+                (select f.name from deedbox.firm f order by f.id limit 1) as firm_name
+           from deedbox.application_run ar join deedbox.staff_member s on s.id = ar.run_by
+          where ar.id = $1`,
+        [runId],
+      )
+      if (run.rowCount === 0) throw new OperationRefused('not_found', 'application run not found')
+      const items = await tx.query(
+        `select fa.id, fa.amount,
+                b.bill_number, m.matter_number, m.title as matter_title,
+                l.ledger_number, a.id as account, a.name as account_name,
+                a.bank_identifiers as account_bank_identifiers,
+                rp.receipt_number, mp.payment_number, mp.executed_at,
+                (select jsonb_agg(jsonb_build_object(
+                          'name', ast.person_name, 'at', pa.at) order by pa.id)
+                   from deedbox.payment_authorisation pa
+                   join deedbox.staff_member ast on ast.id = pa.authoriser
+                  where pa.subject_type = 'money_payment' and pa.subject = fa.money_payment
+                    and pa.decision = 'approved') as approvals
+           from deedbox.funds_application fa
+           join deedbox.bill b on b.id = fa.bill
+           join deedbox.matter m on m.id = b.matter
+           join deedbox.matter_ledger l on l.id = fa.matter_ledger
+           join deedbox.client_account a on a.id = l.account
+           left join deedbox.receivable_payment rp on rp.id = fa.receivable_payment
+           left join deedbox.money_payment mp on mp.id = fa.money_payment
+          where fa.run = $1 and fa.item_state = 'completed'
+          order by a.id, m.matter_number, fa.id`,
+        [runId],
+      )
+      if (items.rowCount === 0) {
+        throw new OperationRefused(
+          'nothing_completed',
+          'no transfer on this run has completed yet — the requisition covers executed transfers only',
+        )
+      }
+      const other = await tx.query(
+        `select count(*)::int as n from deedbox.funds_application
+          where run = $1 and item_state <> 'completed'`,
+        [runId],
+      )
+      const firmDetails = await tx.query(
+        `select jsonb_build_object('account holder', gpd.account_holder_name, 'bank', gpd.bank_name)
+                || gpd.identifier_values as details
+           from deedbox.governing_payment_details() gpd where gpd.id is not null`,
+      )
+      const regional = await firmRegional(tx, p.firm)
+      return {
+        run: run.rows[0],
+        items: items.rows,
+        excluded: other.rows[0].n as number,
+        firm_payee_details: firmDetails.rowCount === 0 ? null : firmDetails.rows[0].details,
+        regional,
+      }
     },
     { readOnly: true },
   )

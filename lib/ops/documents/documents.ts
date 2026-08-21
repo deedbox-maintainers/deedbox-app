@@ -135,7 +135,7 @@ export async function createDocumentWithFileInTx(
     contentType: string
     sizeBytes: number
     storageRef: string
-    source: 'staff_upload' | 'template_generation' | 'signing' | 'import'
+    source: 'staff_upload' | 'template_generation' | 'signing' | 'import' | 'outbound_despatch'
     title?: string
     description?: string | null
     documentDate?: string | null
@@ -153,13 +153,16 @@ export async function createDocumentWithFileInTx(
     /** The import batch this creation belongs to — stamped into the register
      *  event so the repeat-safety exam knows an import wrote it. */
     importBatch?: number
+    /** Machine provenance key (e.g. the despatch that produced this copy) —
+     *  the caller's idempotency handle; a person's upload carries none. */
+    externalRef?: string
   },
 ): Promise<{ document: number; file: number }> {
   const by = input.createdBy ?? p.id
   const file = await tx.query(
     `insert into deedbox.document_file
-       (matter, filename, content_type, size_bytes, storage_ref, source, uploaded_by, uploaded_at)
-     values ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now())) returning id`,
+       (matter, filename, content_type, size_bytes, storage_ref, source, uploaded_by, uploaded_at, external_ref)
+     values ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now()), $9) returning id`,
     [
       input.matter,
       input.filename,
@@ -169,6 +172,7 @@ export async function createDocumentWithFileInTx(
       input.source,
       by,
       input.uploadedAt ?? null,
+      input.externalRef ?? null,
     ],
   )
   const fileId = file.rows[0].id as number

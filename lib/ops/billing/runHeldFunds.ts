@@ -128,3 +128,92 @@ export async function applyHeldFundsToBills(
     matters: matters.size,
   }
 }
+
+/**
+ * The firm-wide sweep: FIND every issued bill still owing whose matter's
+ * client ledger holds available money — nobody names the bills — record the
+ * claims, and preview the run. Nothing financial moves: committing the run
+ * parks one transfer per bill and every transfer still takes its
+ * authorisation. A bill already claimed keeps its claim; a bill whose
+ * transfer already awaits authorisation is left alone — a sweep re-run
+ * never queues the same money twice.
+ */
+export async function prepareFirmWideHeldFunds(
+  p: Principal,
+): Promise<{ run: number; discovered: number; entitled: number; executable: number; refused: number }> {
+  requireStaff(p)
+
+  // the matter join is load-bearing: it puts the viewer's visibility walls
+  // (office/assignment scopes, restricted matters) between them and the
+  // sweep — a firm-wide run must not touch matters its author could not open
+  const rows = await withPrincipal(
+    p,
+    async (tx) => {
+      const r = await tx.query(
+        `select b.id as bill, b.matter,
+                l.id as ledger,
+                deedbox.bill_outstanding(b.id) as outstanding,
+                deedbox.ledger_available(l.id) as available,
+                exists (select 1 from deedbox.entitlement e
+                         where e.bill = b.id and e.cancelled_at is null
+                           and deedbox.entitlement_status(e.id) = 'actionable'
+                           and e.amount - deedbox.entitlement_consumed(e.id) > 0) as already_entitled,
+                exists (select 1 from deedbox.funds_application fa
+                         where fa.bill = b.id and fa.item_state = 'awaiting_authorisation') as already_prepared
+           from deedbox.bill b
+           join deedbox.matter m on m.id = b.matter
+           join lateral (
+             select ml.id from deedbox.matter_ledger ml
+              where ml.matter = b.matter and ml.ledger_kind = 'client_matter' and ml.status = 'open'
+              order by deedbox.ledger_available(ml.id) desc limit 1
+           ) l on true
+          where b.state = 'issued'
+            and deedbox.bill_outstanding(b.id) > 0
+            and deedbox.ledger_available(l.id) > 0
+          order by b.id`,
+      )
+      return r.rows as {
+        bill: number
+        matter: number
+        ledger: number
+        outstanding: string
+        available: string
+        already_entitled: boolean
+        already_prepared: boolean
+      }[]
+    },
+    { readOnly: true },
+  )
+
+  let entitled = 0
+  const matters = new Set<number>()
+  for (const row of rows) {
+    if (row.already_prepared) continue
+    matters.add(row.matter)
+    if (row.already_entitled) continue
+    const amount = Math.min(cents(row.outstanding), cents(row.available)) / 100
+    await establishEntitlement(p, {
+      matterLedger: row.ledger,
+      amount,
+      basisKind: 'rendered_bill',
+      bill: row.bill,
+    })
+    entitled++
+  }
+  if (matters.size === 0) {
+    throw new OperationRefused(
+      'nothing_payable',
+      rows.length > 0
+        ? 'every payable bill already has a transfer awaiting authorisation — approve them on the client-money payments screen'
+        : 'no issued bill can be paid from held money — nothing is owed on a matter holding available funds',
+    )
+  }
+  const preview = await previewHeldFundsApplication(p, { matters: [...matters] })
+  return {
+    run: preview.run,
+    discovered: rows.length,
+    entitled,
+    executable: preview.executable.length,
+    refused: preview.refused.length,
+  }
+}

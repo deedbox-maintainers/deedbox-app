@@ -24,11 +24,15 @@ import {
   previewBillSend,
   sendBill,
   previewHeldFundsApplication,
+  prepareFirmWideHeldFunds,
   commitHeldFundsApplication,
   authoriseHeldFundsItem,
   abandonHeldFundsRun,
   routeUnallocatedRemainders,
 } from '@/lib/ops/billing'
+import { dispatchOutboundQueue, runRequisitionDocumentHtml } from '@/lib/ops/outbound'
+import { heldFundsRunRequisition } from '@/lib/reads/billing'
+import { setDocumentByteStore } from '@/lib/ops/documents/store'
 import { makeAdminPool, buildFixture, addStaff, setFirmSetting, type Fixture } from './helpers'
 
 let admin: Pool
@@ -612,5 +616,266 @@ describe('unallocated-remainder routing', () => {
     )
     expect(receipt.rows[0].receipt_number).toMatch(/^R-/)
     expect(receipt.rows[0].payer_party).toBe(payer.rows[0].id)
+  })
+})
+
+describe('the firm-wide held-funds sweep', () => {
+  it('finds a payable bill nobody claimed, records the claim once, and leaves prepared transfers alone', async () => {
+    const mA = await newMatter('Sweep host A')
+    const ledgerA = (
+      await admin.query(
+        `insert into deedbox.matter_ledger (account, matter) values ($1, $2) returning id`,
+        [fx.account, mA],
+      )
+    ).rows[0].id as number
+    const billA = await issuedBillOn(mA, 12) // 480.00
+    await fundLedger(ledgerA, fx.account, 800)
+    const before = await admin.query(
+      `select count(*)::int as n from deedbox.entitlement where bill = $1`,
+      [billA],
+    )
+    expect(before.rows[0].n).toBe(0)
+
+    // the sweep discovers the bill with NO entitlement, records the claim,
+    // and previews the run — capped at what the bill still owes
+    const r1 = await prepareFirmWideHeldFunds(P)
+    expect(r1.executable).toBeGreaterThanOrEqual(1)
+    const item1 = await admin.query(
+      `select amount, item_state from deedbox.funds_application where run = $1 and bill = $2`,
+      [r1.run, billA],
+    )
+    expect(item1.rowCount).toBe(1)
+    expect(cents(item1.rows[0].amount as string)).toBe(48000)
+    expect(item1.rows[0].item_state).toBe('previewed')
+    const claim = await admin.query(
+      `select count(*)::int as n from deedbox.entitlement
+        where bill = $1 and basis_kind = 'rendered_bill' and cancelled_at is null`,
+      [billA],
+    )
+    expect(claim.rows[0].n).toBe(1)
+
+    // a second sweep never doubles the claim; the bill is still executable
+    const r2 = await prepareFirmWideHeldFunds(P)
+    const claim2 = await admin.query(
+      `select count(*)::int as n from deedbox.entitlement where bill = $1`,
+      [billA],
+    )
+    expect(claim2.rows[0].n).toBe(1)
+    const item2 = await admin.query(
+      `select 1 from deedbox.funds_application where run = $1 and bill = $2`,
+      [r2.run, billA],
+    )
+    expect(item2.rowCount).toBe(1)
+
+    // once the run commits (the transfer parks awaiting authorisation), the
+    // sweep leaves the bill alone — re-running never queues the money twice
+    await commitHeldFundsApplication(P, { run: r2.run })
+    const parked = await admin.query(
+      `select item_state from deedbox.funds_application where run = $1 and bill = $2`,
+      [r2.run, billA],
+    )
+    expect(parked.rows[0].item_state).toBe('awaiting_authorisation')
+    const r3 = await prepareFirmWideHeldFunds(P).then(
+      (x) => x as { run: number } | Error,
+      (e: unknown) => e as Error,
+    )
+    if (r3 instanceof Error) {
+      expect((r3 as { code?: string }).code).toBe('nothing_payable')
+    } else {
+      const again = await admin.query(
+        `select 1 from deedbox.funds_application where run = $1 and bill = $2`,
+        [r3.run, billA],
+      )
+      expect(again.rowCount).toBe(0)
+    }
+  })
+
+  it('a bill on a matter holding no available money is not swept', async () => {
+    const mB = await newMatter('Sweep host B, unfunded')
+    const billB = await issuedBillOn(mB, 5)
+    const r = await prepareFirmWideHeldFunds(P).then(
+      (x) => x as { run: number } | Error,
+      (e: unknown) => e as Error,
+    )
+    if (!(r instanceof Error)) {
+      const item = await admin.query(
+        `select 1 from deedbox.funds_application where run = $1 and bill = $2`,
+        [r.run, billB],
+      )
+      expect(item.rowCount).toBe(0)
+    }
+    const claim = await admin.query(
+      `select count(*)::int as n from deedbox.entitlement where bill = $1`,
+      [billB],
+    )
+    expect(claim.rows[0].n).toBe(0)
+  })
+})
+
+describe('despatch filing — the emailed bill lands on the matter', () => {
+  it('a delivered despatch files the exact attachment, attributed to the sender; a storage outage never unsends', async () => {
+    const mD = await newMatter('Despatch filing host')
+    const billD = await issuedBillOn(mD, 8) // 320.00
+    await sendBill(P, { bill: billD, recipients: ['filed.bset@example.test'], confirmed: true })
+    const msg = await admin.query(
+      `select id from deedbox.outbound_message
+        where purpose = 'bill_despatch' and related = $1 and recipient = 'filed.bset@example.test'`,
+      [billD],
+    )
+    expect(msg.rowCount).toBe(1)
+    const msgId = msg.rows[0].id as number
+
+    const storedBytes: Record<string, Buffer> = {}
+    setDocumentByteStore(async ({ matter, filename, bytes }) => {
+      const ref = `bset-despatch/${matter}/${filename}/${Object.keys(storedBytes).length}`
+      storedBytes[ref] = bytes
+      return { storageRef: ref, contentType: 'application/pdf' }
+    })
+    try {
+      const fakePdfBytes = Buffer.from('%PDF-1.4 settle despatch filing proof')
+      await dispatchOutboundQueue(
+        P,
+        async (m) => {
+          if (m.purpose === 'bill_despatch') {
+            return {
+              attachments: [
+                {
+                  filename: 'Tax Invoice TEST-001.pdf',
+                  contentType: 'application/pdf',
+                  contentBase64: fakePdfBytes.toString('base64'),
+                },
+              ],
+            }
+          }
+        },
+        { limit: 200 },
+      )
+      const sentRow = await admin.query(
+        `select state from deedbox.outbound_message where id = $1`,
+        [msgId],
+      )
+      expect(sentRow.rows[0].state).toBe('sent')
+      const df = await admin.query(
+        `select id, matter, filename, source, size_bytes, storage_ref, uploaded_by
+           from deedbox.document_file where external_ref = $1`,
+        [`outbound_despatch:${msgId}`],
+      )
+      expect(df.rowCount).toBe(1)
+      expect(df.rows[0].matter).toBe(mD)
+      expect(df.rows[0].source).toBe('outbound_despatch')
+      expect(df.rows[0].filename).toBe('Tax Invoice TEST-001.pdf')
+      expect(Number(df.rows[0].size_bytes)).toBe(fakePdfBytes.length)
+      expect(df.rows[0].uploaded_by).toBe(fx.staff)
+      expect(storedBytes[df.rows[0].storage_ref as string]?.equals(fakePdfBytes)).toBe(true)
+      const head = await admin.query(
+        `select title, description, created_by from deedbox.document where current_file = $1`,
+        [df.rows[0].id],
+      )
+      expect(head.rowCount).toBe(1)
+      expect(head.rows[0].title).toBe('Tax Invoice TEST-001')
+      expect(head.rows[0].description).toContain('filed.bset@example.test')
+      expect(head.rows[0].created_by).toBe(fx.staff)
+    } finally {
+      setDocumentByteStore(null)
+    }
+
+    // the outage half: no byte store bound — the message still sends; the
+    // filing failure is a register note, never a rolled-back despatch
+    await sendBill(P, { bill: billD, recipients: ['filed2.bset@example.test'], confirmed: true })
+    const msg2 = await admin.query(
+      `select id from deedbox.outbound_message
+        where purpose = 'bill_despatch' and related = $1 and recipient = 'filed2.bset@example.test'`,
+      [billD],
+    )
+    const msg2Id = msg2.rows[0].id as number
+    await dispatchOutboundQueue(
+      P,
+      async (m) => {
+        if (m.purpose === 'bill_despatch') {
+          return {
+            attachments: [
+              {
+                filename: 'Tax Invoice TEST-001.pdf',
+                contentType: 'application/pdf',
+                contentBase64: Buffer.from('%PDF-1.4 outage half').toString('base64'),
+              },
+            ],
+          }
+        }
+      },
+      { limit: 50 },
+    )
+    const sent2 = await admin.query(`select state from deedbox.outbound_message where id = $1`, [
+      msg2Id,
+    ])
+    expect(sent2.rows[0].state).toBe('sent')
+    const df2 = await admin.query(
+      `select 1 from deedbox.document_file where external_ref = $1`,
+      [`outbound_despatch:${msg2Id}`],
+    )
+    expect(df2.rowCount).toBe(0)
+    const note = await admin.query(
+      `select detail from deedbox.register_entry
+        where subject_type = 'outbound_message' and subject = $1
+          and detail ? 'despatch_filing_failed'
+        order by id desc limit 1`,
+      [msg2Id],
+    )
+    expect(note.rowCount).toBe(1)
+  })
+})
+
+describe('the consolidated run requisition', () => {
+  it('one form covers the completed transfers with numbers, approvals and the total; an uncompleted run refuses', async () => {
+    const mR = await newMatter('Requisition host')
+    const ledgerR = (
+      await admin.query(
+        `insert into deedbox.matter_ledger (account, matter) values ($1, $2) returning id`,
+        [fx.account, mR],
+      )
+    ).rows[0].id as number
+    const billR = await issuedBillOn(mR, 10) // 400.00
+    await fundLedger(ledgerR, fx.account, 1000)
+    await admin.query(
+      `insert into deedbox.entitlement (matter_ledger, basis_kind, bill, amount, notice_required)
+       values ($1, 'rendered_bill', $2, 400, false)`,
+      [ledgerR, billR],
+    )
+    const preview = await previewHeldFundsApplication(P, { matter: mR })
+    await commitHeldFundsApplication(P, { run: preview.run })
+    const item = await admin.query(
+      `select id from deedbox.funds_application where run = $1`,
+      [preview.run],
+    )
+    const done = await authoriseHeldFundsItem(S, { item: item.rows[0].id, decision: 'approve' })
+    expect(done).toMatchObject({ executed: true })
+
+    const req = await heldFundsRunRequisition(P, preview.run)
+    expect(req.items.length).toBe(1)
+    const it1 = req.items[0]
+    expect(String(it1.bill_number)).toBeTruthy()
+    expect(String(it1.receipt_number)).toMatch(/^OR-/)
+    expect(it1.payment_number).toBeTruthy()
+    expect(cents(it1.amount as string)).toBe(40000)
+    expect(Array.isArray(it1.approvals)).toBe(true)
+    expect((it1.approvals as unknown[]).length).toBeGreaterThanOrEqual(1)
+    expect(it1.account_name).toBeTruthy()
+    expect(req.excluded).toBe(0)
+    expect(req.regional.currency).toBeTruthy()
+    const total = req.items.reduce((s, i) => s + Number(i.amount), 0)
+    expect(Math.round(total * 100)).toBe(40000)
+
+    // the renderer produces the one-form document from exactly these facts
+    const html = runRequisitionDocumentHtml(req)
+    expect(html).toContain('EFT Requisition')
+    expect(html).toContain(String(it1.receipt_number))
+    expect(html).toContain('one transfer to the firm')
+
+    // a run with nothing completed refuses typed — the requisition never
+    // shows money that has not moved
+    const second = await previewHeldFundsApplication(P, { matter: mR })
+    await expect(heldFundsRunRequisition(P, second.run)).rejects.toMatchObject({
+      code: 'nothing_completed',
+    })
   })
 })

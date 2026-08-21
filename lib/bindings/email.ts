@@ -21,7 +21,7 @@
 // - text_message rows fail typed: no text-message transport exists on this
 //   installation yet.
 
-import type { Deliverer } from '@/lib/ops/outbound'
+import type { Deliverer, DeliveryReport } from '@/lib/ops/outbound'
 import { presenterFor, type HtmlToPdf } from '@/lib/ops/outbound/presentation'
 
 /** Injectable HTTP POST so the suite proves composition without a network. */
@@ -70,6 +70,7 @@ export function emailTransport(cfg: EmailTransportConfig): Deliverer {
       )
     }
     let payload: Record<string, unknown>
+    let report: DeliveryReport | undefined
     if (message.contentType !== null && message.contentType.startsWith('application/json')) {
       const presenter = presenterFor(message.purpose)
       if (!presenter) {
@@ -84,6 +85,11 @@ export function emailTransport(cfg: EmailTransportConfig): Deliverer {
         throw new Error(`presentation_failed: the stored rendering for '${message.purpose}' is not readable data`)
       }
       const presented = await presenter(data, { htmlToPdf: cfg.htmlToPdf })
+      if (presented.attachments && presented.attachments.length > 0) {
+        // reported back after the send so the product can file the exact
+        // copy the recipient received
+        report = { attachments: presented.attachments }
+      }
       payload = {
         from: cfg.from,
         to: [message.recipient],
@@ -122,5 +128,6 @@ export function emailTransport(cfg: EmailTransportConfig): Deliverer {
     if (r.status < 200 || r.status >= 300) {
       throw new Error(`mail_api_error: HTTP ${r.status} ${r.text.slice(0, 160)}`)
     }
+    return report
   }
 }

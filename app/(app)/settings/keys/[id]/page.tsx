@@ -6,7 +6,12 @@ import { keyDetail } from '@/lib/reads/operations'
 import { Page, Panel, DataTable, EmptyState, Notices, RowLink, Badge, fmtDateTime, fmtJson, personName } from '@/components/ui'
 import { SubmitButton, Field, Select } from '@/components/forms'
 import { readParams, type SearchParams } from '@/lib/screens/action'
-import { exportKeyActivityAction, setKeyDefaultsAction, clearKeyDefaultsAction } from '../actions'
+import {
+  exportKeyActivityAction,
+  setKeyDefaultsAction,
+  clearKeyDefaultsAction,
+  setKeyTemplatesReadAction,
+} from '../actions'
 
 export default async function KeyDetailPage({
   params,
@@ -96,6 +101,31 @@ export default async function KeyDetailPage({
             <SubmitButton tone="quiet">Clear defaults (closes the matter door)</SubmitButton>
           </form>
         ) : null}
+      </Panel>
+      <Panel title="Template reading">
+        <p className="mb-2 text-xs text-neutral-500">
+          Off by default. On, the sender may list the firm&rsquo;s active document templates and
+          fetch their files — and nothing else: no matters, no clients, no money, no staff, no
+          documents on matters. Every read is recorded against the key; every flip of this switch
+          is recorded too.
+        </p>
+        {k.revoked_at ? (
+          <p className="text-sm text-neutral-500">This key is revoked — nothing to switch.</p>
+        ) : k.templates_read ? (
+          <form action={setKeyTemplatesReadAction} className="flex items-center gap-3">
+            <Badge tone="amber">template reading is ON</Badge>
+            <input type="hidden" name="key" value={String(k.id)} />
+            <input type="hidden" name="enabled" value="off" />
+            <SubmitButton tone="quiet">Switch template reading off</SubmitButton>
+          </form>
+        ) : (
+          <form action={setKeyTemplatesReadAction} className="flex items-center gap-3">
+            <Badge tone="neutral">template reading is off</Badge>
+            <input type="hidden" name="key" value={String(k.id)} />
+            <input type="hidden" name="enabled" value="on" />
+            <SubmitButton>Switch template reading on</SubmitButton>
+          </form>
+        )}
       </Panel>
       <Panel title={`Submissions (${d.submissions.length})`}>
         {d.submissions.length === 0 ? (

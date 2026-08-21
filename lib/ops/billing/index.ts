@@ -94,7 +94,7 @@ export {
   authoriseHeldFundsItem,
   abandonHeldFundsRun,
 } from './heldFunds'
-export { applyHeldFundsToRunBills, applyHeldFundsToBills } from './runHeldFunds'
+export { applyHeldFundsToRunBills, applyHeldFundsToBills, prepareFirmWideHeldFunds } from './runHeldFunds'
 export { executeHeldFundsPayment, completeExecutedHeldFundsItem } from './heldFunds'
 export {
   replaceBillAttribution,

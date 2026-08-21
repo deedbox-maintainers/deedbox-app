@@ -16,7 +16,7 @@ export default async function KeysPage({ searchParams }: { searchParams: SearchP
   return (
     <Page
       title="Integration keys"
-      lead="Keys accept records from your website or other systems. Senders can never read anything, set any financial field, or classify their submissions."
+      lead="Keys accept records from your website or other systems. Senders can never set any financial field or classify their submissions, and can read nothing — unless you switch on template reading for a specific key, which opens the firm's document templates to it and nothing else."
     >
       <Notices searchParams={sp} />
       <Panel title={`${keys.length} key(s)`}>
@@ -24,7 +24,7 @@ export default async function KeysPage({ searchParams }: { searchParams: SearchP
           <EmptyState>No keys — issue one to accept records from your website or other systems.</EmptyState>
         ) : (
           <DataTable
-            headers={['Label', 'Key', 'Issued', 'Last used', 'Rate limit', 'Mode', 'State', '', '']}
+            headers={['Label', 'Key', 'Issued', 'Last used', 'Rate limit', 'Mode', 'Reads', 'State', '', '']}
             rows={keys.map((k) => [
               String(k.label),
               String(k.key_display),
@@ -34,6 +34,7 @@ export default async function KeysPage({ searchParams }: { searchParams: SearchP
               k.last_used_at ? fmtDateTime(k.last_used_at) : 'never',
               fmtJson(k.rate_limit),
               k.test_mode ? <Badge key="t" tone="violet">test</Badge> : 'live',
+              k.templates_read ? <Badge key="tr" tone="amber">templates</Badge> : 'nothing',
               k.revoked_at ? <Badge key="r" tone="red">revoked</Badge> : <Badge key="r" tone="green">active</Badge>,
               <RowLink key="o" href={`/settings/keys/${k.id}`}>
                 Activity

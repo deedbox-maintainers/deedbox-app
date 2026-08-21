@@ -193,7 +193,7 @@ export async function keysScreen(p: Principal) {
       })()
       const keys = await tx.query(
         `select k.id, k.label, k.key_display, k.issued_at, k.last_used_at, k.revoked_at,
-                k.rate_limit, k.test_mode, k.payload_versions,
+                k.rate_limit, k.test_mode, k.payload_versions, k.templates_read,
                 s.person_name as issued_by_name
            from deedbox.integration_key k
            join deedbox.staff_member s on s.id = k.issued_by
@@ -215,7 +215,7 @@ export async function keyDetail(p: Principal, key: number) {
       }
       const k = await tx.query(
         `select k.id, k.label, k.key_display, k.issued_at, k.last_used_at, k.revoked_at,
-                k.rate_limit, k.test_mode, k.payload_versions,
+                k.rate_limit, k.test_mode, k.payload_versions, k.templates_read,
                 s.person_name as issued_by_name
            from deedbox.integration_key k
            join deedbox.staff_member s on s.id = k.issued_by

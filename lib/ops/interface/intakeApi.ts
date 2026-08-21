@@ -50,8 +50,10 @@
 //   * Granular doors accept an OPTIONAL external_ref for idempotency;
 //     absent, each call creates (the row's idempotency key is a synthesised
 //     auto_… value, recorded verbatim).
-//   * /me writes nothing — the one read a key can perform, revealing the
-//     firm's display name only.
+//   * /me writes nothing, revealing the firm's display name only. The only
+//     other read a key can EVER perform is the templates door
+//     (templatesApi) — per-key opt-in, templates only, evidence on every
+//     call.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { Principal, Tx } from '@/lib/db'
@@ -180,6 +182,7 @@ interface AuthedKey {
   test_mode: boolean
   rate_limit: { per_minute?: number; per_day?: number }
   revoked: boolean
+  templates_read: boolean
 }
 
 function safeHashEqual(a: string, b: string): boolean {
@@ -195,7 +198,7 @@ async function authenticate(firm: number, secret: string): Promise<AuthedKey | n
     { kind: 'integration_key', id: 0, firm },
     async (tx) => {
       const r = await tx.query(
-        `select id, label, secret_hash, revoked_at, rate_limit, test_mode
+        `select id, label, secret_hash, revoked_at, rate_limit, test_mode, templates_read
            from deedbox.integration_key where secret_hash = $1`,
         [hash],
       )
@@ -208,6 +211,7 @@ async function authenticate(firm: number, secret: string): Promise<AuthedKey | n
         test_mode: Boolean(r.rows[0].test_mode),
         rate_limit: (r.rows[0].rate_limit ?? {}) as { per_minute?: number; per_day?: number },
         revoked: r.rows[0].revoked_at !== null,
+        templates_read: Boolean(r.rows[0].templates_read),
       }
     },
     { readOnly: true },
@@ -971,3 +975,8 @@ export async function intakeAddDocuments(
     throw err
   }
 }
+
+// The read door (templatesApi) authenticates through the same lookup — one
+// hashing discipline, one key shape, two doors.
+export { authenticate as authenticateIntegrationKey }
+export type { AuthedKey }

@@ -9,8 +9,8 @@ export {
   retryOutboundMessage,
   retrieveArtefact,
 } from './messages'
-export type { QueueMessageInput, Deliverer } from './messages'
-export { presenterFor, billDocumentHtml, requisitionDocumentHtml, ledgerDocumentHtml } from './presentation'
+export type { QueueMessageInput, Deliverer, DeliveryReport, DeliveredAttachment } from './messages'
+export { presenterFor, billDocumentHtml, requisitionDocumentHtml, runRequisitionDocumentHtml, ledgerDocumentHtml } from './presentation'
 export type {
   PresentedMessage,
   PresentedAttachment,

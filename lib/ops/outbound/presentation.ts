@@ -416,6 +416,92 @@ export function requisitionDocumentHtml(data: RequisitionRendering): string {
   </div></body></html>`
 }
 
+// The consolidated EFT requisition for a held-funds run: every COMPLETED
+// transfer on one form — grouped by the client account the money left, with
+// each matter's bill, receipt and payment numbers and who approved it, the
+// firm's own receiving details, and one grand total for the one bank
+// transfer that covers them all.
+export interface RunRequisitionRendering {
+  run: Record<string, unknown>
+  items: Record<string, unknown>[]
+  excluded: number
+  firm_payee_details: unknown
+  regional?: { currency?: string; locale?: string } | null
+}
+
+export function runRequisitionDocumentHtml(data: RunRequisitionRendering): string {
+  const R = regionalFrom(data.regional)
+  const run = data.run
+  const total = data.items.reduce((s, i) => s + Number(i.amount ?? 0), 0)
+  const byAccount = new Map<number, Record<string, unknown>[]>()
+  for (const i of data.items) {
+    const a = Number(i.account)
+    if (!byAccount.has(a)) byAccount.set(a, [])
+    byAccount.get(a)!.push(i)
+  }
+  const sections = [...byAccount.values()]
+    .map((items) => {
+      const first = items[0]
+      const payer = (first.account_bank_identifiers ?? {}) as Record<string, string>
+      const payerText = Object.entries(payer)
+        .map(([k, v]) => `${bankFieldLabel(k)} ${v}`)
+        .join(' · ')
+      const subtotal = items.reduce((s, i) => s + Number(i.amount ?? 0), 0)
+      const rows = items
+        .map((i) => {
+          const approvals = Array.isArray(i.approvals)
+            ? (i.approvals as { name?: unknown; at?: unknown }[])
+                .map((a) => `${personName(a.name)} · ${fmtStamp(a.at)}`)
+                .join('; ')
+            : '—'
+          return `<tr>
+            <td>${esc(String(i.matter_number ?? ''))} — ${esc(String(i.matter_title ?? ''))}</td>
+            <td>${esc(String(i.ledger_number ?? ''))}</td>
+            <td>${esc(String(i.bill_number ?? ''))}</td>
+            <td>${esc(String(i.receipt_number ?? '—'))}</td>
+            <td>${esc(String(i.payment_number ?? '—'))}</td>
+            <td>${esc(approvals)}</td>
+            <td class="right">${money(i.amount, R)}</td>
+          </tr>`
+        })
+        .join('')
+      return `<h2>Paid from — ${esc(String(first.account_name ?? ''))}${payerText ? ` · ${esc(payerText)}` : ''}</h2>
+        <table>
+          <thead><tr><th>Matter</th><th>Ledger</th><th>Bill</th><th>Receipt</th><th>Payment</th><th>Approved</th><th class="right">Amount</th></tr></thead>
+          <tbody>${rows}
+            ${byAccount.size > 1 ? `<tr class="grand"><td colspan="6">Account subtotal</td><td class="right">${money(subtotal, R)}</td></tr>` : ''}
+          </tbody>
+        </table>`
+    })
+    .join('')
+  const paidTo = bankDetailsText(data.firm_payee_details)
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${PAGE_CSS}</style></head><body><div class="wrap">
+    <div class="firm">
+      <div><h1>${esc(String(run.firm_name ?? ''))}</h1></div>
+      <div class="small right"><div class="doc-title">EFT Requisition</div><div>Held-funds run #${esc(String(run.id ?? ''))} · ${fmtStamp(run.run_at)}</div></div>
+    </div>
+    <div class="row">
+      <div><strong>Paid to (the firm's account):</strong> ${esc(paidTo || '— (payment details not configured)')}</div>
+      <div class="small right"><strong>Completed transfers:</strong> ${String(data.items.length)}</div>
+    </div>
+    ${sections}
+    <table><tbody>
+      <tr class="grand"><td>Total — one transfer to the firm's account</td><td class="right">${money(total, R)}</td></tr>
+    </tbody></table>
+    ${
+      data.excluded > 0
+        ? `<div class="muted small" style="margin-top:8px">${String(data.excluded)} item(s) on this run are not included — refused, or still awaiting authorisation; they appear on the run page with their reasons.</div>`
+        : ''
+    }
+    <table style="margin-top:36px"><tr>
+      <td style="width:50%;border-top:1px solid #333;padding-top:6px">Prepared — signature &amp; date</td>
+      <td style="width:8%"></td>
+      <td style="border-top:1px solid #333;padding-top:6px">Authorised — signature &amp; date</td>
+    </tr></table>
+    <div class="muted small" style="margin-top:10px">Each transfer above passed its own authorisation before executing. The register is the record; this document is its paper face.</div>
+  </div></body></html>`
+}
+
 // The client-money ledger as a document: the header and every line in entry
 // order with running balances — the ledger screen's facts, rendered for the
 // converter so the printout for the file is a real PDF.

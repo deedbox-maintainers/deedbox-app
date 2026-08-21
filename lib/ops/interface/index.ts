@@ -2,8 +2,10 @@
 // submission handler, the deferred duplicate review transition, and the
 // per-key activity export.
 
-export { issueIntegrationKey, revokeIntegrationKey } from './keys'
+export { issueIntegrationKey, revokeIntegrationKey, setKeyTemplatesRead } from './keys'
 export type { RateLimit } from './keys'
+export { templatesList, templatesFetch, TEMPLATE_MERGE_GRAMMAR, TEMPLATE_MERGE_DELIMITERS } from './templatesApi'
+export type { TemplatesOutcome, TemplateListEntry, TemplateFile } from './templatesApi'
 export { handleInboundSubmission, reviewDuplicateDecision } from './submissions'
 export type { SubmissionRequest, SubmissionOutcome } from './submissions'
 export { exportKeyActivity } from './activity'

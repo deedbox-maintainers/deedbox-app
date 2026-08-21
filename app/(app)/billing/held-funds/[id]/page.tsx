@@ -32,6 +32,20 @@ export default async function HeldFundsRunPage({
       lead={`${String(d.run.scope).replace('_', ' ')} · ${fmtDateTime(d.run.run_at)} by ${String((d.run.run_by_name as { family?: string })?.family ?? '')} · ${String(d.run.state).replace(/_/g, ' ')}.`}
     >
       <Notices searchParams={sp} />
+      {d.items.some((i) => i.item_state === 'completed') ? (
+        <p className="mb-3 text-sm">
+          <a
+            href={`/billing/held-funds/${String(d.run.id)}/requisition/pdf`}
+            className="text-sky-700 underline"
+          >
+            Download the EFT requisition (PDF)
+          </a>{' '}
+          <span className="text-neutral-500">
+            — one form covering every completed transfer, with the total and an itemised list per
+            matter.
+          </span>
+        </p>
+      ) : null}
       {bankFile && d.items.some((i) => i.item_state === 'completed') ? (
         <p className="mb-3 text-sm">
           <a href={`/billing/held-funds/${String(d.run.id)}/aba`} className="text-sky-700 underline">

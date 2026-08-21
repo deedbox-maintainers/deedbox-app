@@ -10,6 +10,7 @@ import {
   exportKeyActivity,
   setIntakeKeyDefaults,
   clearIntakeKeyDefaults,
+  setKeyTemplatesRead,
 } from '@/lib/ops/interface'
 import { parse } from '@/components/forms'
 
@@ -56,5 +57,16 @@ export async function clearKeyDefaultsAction(formData: FormData): Promise<void> 
   await act(`/settings/keys/${key}`, async (p) => {
     await clearIntakeKeyDefaults(p, { key })
     return 'Creation defaults cleared — the matter door for this key is closed until new defaults are set.'
+  })
+}
+
+export async function setKeyTemplatesReadAction(formData: FormData): Promise<void> {
+  const key = parse.num(formData, 'key')
+  const enabled = parse.str(formData, 'enabled') === 'on'
+  await act(`/settings/keys/${key}`, async (p) => {
+    await setKeyTemplatesRead(p, { key, enabled })
+    return enabled
+      ? 'Template reading is ON for this key — it can list and fetch the firm\u2019s active document templates, and nothing else. The change is recorded.'
+      : 'Template reading is OFF for this key — it is back to accepting records only. The change is recorded.'
   })
 }
